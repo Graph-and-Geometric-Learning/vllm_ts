@@ -85,6 +85,12 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
+TimeseriesItem: TypeAlias = Union[np.ndarray, "torch.Tensor"]
+"""
+Represents a single timeseries item (e.g., OHLCV financial data).
+Can be a numpy array or torch tensor with shape (num_channels, sequence_length).
+"""
+
 ModalityData: TypeAlias = Union[_T, list[Optional[_T]], None]
 """
 Either a single data item, or a list of data items. Can only be None if UUID
@@ -107,6 +113,9 @@ class MultiModalDataBuiltins(TypedDict, total=False):
 
     audio: ModalityData[AudioItem]
     """The input audio(s)."""
+
+    timeseries: ModalityData[TimeseriesItem]
+    """The input timeseries data (e.g., OHLCV financial data)."""
 
 
 MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]

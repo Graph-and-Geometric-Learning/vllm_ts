@@ -16,7 +16,8 @@ from vllm.utils import LazyLoader, is_list_of
 from .audio import AudioResampler
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
                      ImageItem, ModalityData, MultiModalDataDict,
-                     MultiModalFieldConfig, MultiModalKwargsItems, VideoItem)
+                     MultiModalFieldConfig, MultiModalKwargsItems, VideoItem,
+                     TimeseriesItem)
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -257,6 +258,31 @@ class VideoEmbeddingItems(EmbeddingItems):
         super().__init__(data, "video")
 
 
+class TimeseriesProcessorItems(ProcessorBatchItems[TimeseriesItem]):
+    """Processor items for timeseries data (e.g., OHLCV financial data)."""
+
+    def __init__(self, data: Optional[Sequence[TimeseriesItem]]) -> None:
+        if data is None:
+            data = [None]
+        super().__init__(data, "timeseries")
+
+    def get_timeseries_shape(self, item_idx: int) -> tuple[int, int]:
+        """Get (num_channels, sequence_length) of a timeseries item."""
+        ts = self.get(item_idx)
+        if isinstance(ts, torch.Tensor):
+            return tuple(ts.shape[-2:])
+        elif isinstance(ts, np.ndarray):
+            return ts.shape[-2:]
+        return (0, 0)
+
+
+class TimeseriesEmbeddingItems(EmbeddingItems):
+    """Embedding items for pre-computed timeseries embeddings."""
+
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
+        super().__init__(data, "timeseries")
+
+
 _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 
@@ -342,6 +368,17 @@ class MultiModalDataParser:
     def _is_embeddings(
             self, data: object
     ) -> TypeGuard[Union[torch.Tensor, list[torch.Tensor]]]:
+        if isinstance(data, torch.Tensor):
+            return data.ndim == 3
+        if is_list_of(data, torch.Tensor):
+            return data[0].ndim == 2
+
+        return False
+
+    def _is_timeseries_embeddings(
+            self, data: object
+    ) -> TypeGuard[Union[torch.Tensor, list[torch.Tensor]]]:
+        """Check if data is pre-computed timeseries embeddings."""
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
@@ -488,11 +525,38 @@ class MultiModalDataParser:
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
+    def _parse_timeseries_data(
+        self,
+        data: ModalityData[TimeseriesItem],
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        """Parse timeseries data (e.g., OHLCV financial data)."""
+        if data is None:
+            return TimeseriesProcessorItems(None)
+
+        if self._is_empty(data):
+            return None
+
+        if self._is_timeseries_embeddings(data):
+            return TimeseriesEmbeddingItems(data)
+
+        # Single timeseries item (2D tensor/array: channels x seq_len)
+        if isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 2:
+            data_items = [data]
+        # Batched timeseries (3D tensor/array: batch x channels x seq_len)
+        elif isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 3:
+            data_items = [elem for elem in data]
+        # List of timeseries items
+        else:
+            data_items = data
+
+        return TimeseriesProcessorItems(data_items)
+
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
             "audio": self._parse_audio_data,
             "image": self._parse_image_data,
             "video": self._parse_video_data,
+            "timeseries": self._parse_timeseries_data,
         }
 
     def parse_mm_data(self,
