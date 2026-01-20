@@ -275,6 +275,11 @@ class TimeseriesProcessorItems(ProcessorBatchItems[TimeseriesItem]):
             return ts.shape[-2:]
         return (0, 0)
 
+    def get_processor_data(self) -> Mapping[str, object]:
+        # Override to use "timeseries" instead of "timeseriess"
+        # since "timeseries" is both singular and plural
+        return {"timeseries": self.data}
+
 
 class TimeseriesEmbeddingItems(EmbeddingItems):
     """Embedding items for pre-computed timeseries embeddings."""
