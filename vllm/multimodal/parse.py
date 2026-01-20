@@ -383,11 +383,27 @@ class MultiModalDataParser:
     def _is_timeseries_embeddings(
             self, data: object
     ) -> TypeGuard[Union[torch.Tensor, list[torch.Tensor]]]:
-        """Check if data is pre-computed timeseries embeddings."""
+        """Check if data is pre-computed timeseries embeddings.
+
+        Distinguishes between raw timeseries (seq_len, channels) and
+        embeddings (num_tokens, hidden_dim) based on the last dimension size.
+        Raw timeseries has small channel count (e.g., 5 for OHLCV), while
+        embeddings have large hidden dimension (typically 512+).
+
+        Note: Unlike image/video where raw data is 3D+ and embeddings are 2D,
+        raw timeseries is also 2D per item, so we need a dimension threshold.
+        """
+        # Embeddings have hidden_dim > 64 (typically 512+)
+        EMBEDDING_DIM_THRESHOLD = 64
+
         if isinstance(data, torch.Tensor):
-            return data.ndim == 3
+            # Batched embeddings: (batch, num_tokens, hidden_dim)
+            return data.ndim == 3 and data.shape[-1] > EMBEDDING_DIM_THRESHOLD
         if is_list_of(data, torch.Tensor):
-            return data[0].ndim == 2
+            # List of embeddings: each is (num_tokens, hidden_dim)
+            # Raw timeseries is (seq_len, channels) where channels is small
+            return (data[0].ndim == 2
+                    and data[0].shape[-1] > EMBEDDING_DIM_THRESHOLD)
 
         return False
 

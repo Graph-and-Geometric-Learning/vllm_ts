@@ -48,7 +48,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (AutoWeightsLoader, init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 logger = logging.getLogger(__name__)
 
@@ -738,21 +739,84 @@ class TS2QwenForCausalLM_v2(nn.Module, SupportsMultiModal, SupportsPP):
             return timeseries
         return torch.tensor(timeseries, dtype=torch.float32)
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        """Returns multimodal embeddings (soft tokens) generated from timeseries data."""
+    def get_multimodal_embeddings(
+        self,
+        **kwargs: object,
+    ) -> MultiModalEmbeddings:
+        """
+        Returns multimodal embeddings generated from multimodal kwargs.
+
+        This is the interface method required by vLLM's SupportsMultiModal.
+        Returns empty list [] if no multimodal input (never None).
+        """
         ts_input = self._parse_and_validate_timeseries_input(**kwargs)
         if ts_input is None:
-            return []
+            return []  # Must return empty list, not None
 
+        # Handle pre-computed embeddings
         if ts_input.dim() == 3 and ts_input.shape[-1] == self.llm_hidden_size:
-            return ts_input
+            # Already embedded - return as tuple of 2D tensors
+            return tuple(ts_input[i] for i in range(ts_input.shape[0]))
 
         ts_input = ts_input.to(dtype=torch.float32)
+
+        # Handle different input dimensions:
+        # - 2D: (seq_len, channels) - single item, add batch dim
+        # - 3D: (batch, seq_len, channels) - normal batch
+        # - 4D: (batch, 1, seq_len, channels) - vLLM batching adds extra dim
         if ts_input.dim() == 2:
-            ts_input = ts_input.unsqueeze(0)
+            ts_input = ts_input.unsqueeze(0)  # (1, seq_len, channels)
+        elif ts_input.dim() == 4:
+            # Squeeze the extra dimension added by vLLM's batching
+            ts_input = ts_input.squeeze(1)  # (batch, seq_len, channels)
 
         soft_tokens = self._encode_timeseries(ts_input)
-        return soft_tokens
+
+        # Return as tuple of 2D tensors (one per batch item)
+        return tuple(soft_tokens[i] for i in range(soft_tokens.shape[0]))
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        """Alias for get_multimodal_embeddings for backward compatibility."""
+        return self.get_multimodal_embeddings(**kwargs)
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        """
+        Returns input embeddings merged from text embeddings and multimodal embeddings.
+
+        This is the interface method required by vLLM's SupportsMultiModal.
+        The multimodal embeddings are merged at placeholder token positions.
+        """
+        # Get text embeddings from language model
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+
+        if multimodal_embeddings is not None and len(multimodal_embeddings) != 0:
+            # Get the timeseries token id from config or use default
+            ts_token_id = getattr(self.config, "timeseries_token_id", None)
+            if ts_token_id is None:
+                # Try to find the token id by looking for placeholder pattern in input_ids
+                # The placeholder token should be repeated num_soft_tokens times
+                # For now, use the first non-standard high token id found
+                # (custom tokens in Qwen start at vocab_size)
+                vocab_size = getattr(self.config, "vocab_size", 151936)
+                mask = input_ids >= vocab_size
+                if mask.any():
+                    ts_token_id = input_ids[mask][0].item()
+                else:
+                    # Fallback: assume it's the last token in vocab + 1
+                    ts_token_id = vocab_size
+
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                placeholder_token_id=ts_token_id,
+            )
+
+        return inputs_embeds
 
     def _process_timeseries_input(
         self,
